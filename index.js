@@ -129,13 +129,25 @@ export default {
         throw new Error(`GitHub generate error: ${repoData.message || JSON.stringify(repoData)}`);
       }
 
-      // انتظار 2.5 ثانية حتى يكتمل نسخ ملفات القالب
-      await new Promise((r) => setTimeout(r, 2500));
-
-      // 2. جلب SHA الخاص بـ site-config.json
+      // 2. جلب SHA الخاص بـ site-config.json مع إعادة المحاولة حتى يجهز المستودع
       const fileUrl = `https://api.github.com/repos/ddaiftaki-cyber/${slug}/contents/site-config.json`;
-      const getFileRes = await fetch(fileUrl, { headers: ghHeaders });
-      const fileInfo = getFileRes.ok ? await getFileRes.json() : null;
+      let fileSha = null;
+
+      for (let attempt = 0; attempt < 8; attempt++) {
+        await new Promise((r) => setTimeout(r, 1500));
+        const getFileRes = await fetch(fileUrl, { headers: ghHeaders });
+        if (getFileRes.ok) {
+          const fileInfo = await getFileRes.json();
+          if (fileInfo && fileInfo.sha) {
+            fileSha = fileInfo.sha;
+            break;
+          }
+        }
+      }
+
+      if (!fileSha) {
+        throw new Error(`Could not retrieve SHA for site-config.json in ${slug}. Template copy may still be initializing.`);
+      }
 
       // 3. تحديث site-config.json ببيانات العميل
       const encodedContent = btoa(unescape(encodeURIComponent(JSON.stringify(siteConfig, null, 2))));
@@ -145,7 +157,7 @@ export default {
         body: JSON.stringify({
           message: `Configure site for ${clientName}`,
           content: encodedContent,
-          ...(fileInfo?.sha ? { sha: fileInfo.sha } : {}),
+          sha: fileSha,
         }),
       });
 
