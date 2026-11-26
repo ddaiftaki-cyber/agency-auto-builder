@@ -11,43 +11,85 @@ export default {
     }
 
     if (request.method !== "POST") {
-      return new Response(JSON.stringify({ success: false, error: "Method not allowed" }), {
-        status: 405,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
+      return new Response(
+        JSON.stringify({ success: false, error: "Method not allowed" }),
+        { status: 405, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
     }
 
     try {
       const body = await request.json();
       const { clientName, productDescription, price, color, pixelId } = body;
 
-      if (!env.GEMINI_API_KEY || !env.GITHUB_TOKEN) {
-        throw new Error("Missing GEMINI_API_KEY or GITHUB_TOKEN in Worker secrets.");
+      if (!env.GITHUB_TOKEN) {
+        throw new Error("Missing GITHUB_TOKEN in Worker secrets.");
       }
 
       const prompt = `Generate JSON only (no markdown) with keys: heroTitle, heroSubtitle, features (array of 4 short Arabic strings) for brand "${clientName}" selling "${productDescription}" at price "${price}".`;
 
-      const geminiRes = await fetch(
-`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${env.GEMINI_API_KEY}`        ,{
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            contents: [{ parts: [{ text: prompt }] }],
-            generationConfig: { responseMimeType: "application/json" },
-          }),
+      // قائمة النماذج بالترتيب (الأساسي ثم البدائل السريعة)
+      const models = [
+        "gemini-3.8-flash",
+        "gemini-2.5-flash-lite",
+        "gemini-2.0-flash"
+      ];
+
+      let generated = null;
+      let usedModel = "fallback-template";
+
+      if (env.GEMINI_API_KEY) {
+        for (const model of models) {
+          try {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 15000);
+
+            const geminiRes = await fetch(
+              `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${env.GEMINI_API_KEY}`,
+              {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                signal: controller.signal,
+                body: JSON.stringify({
+                  contents: [{ parts: [{ text: prompt }] }],
+                  generationConfig: {
+                    responseMimeType: "application/json",
+                    ...(model.includes("3.8") || model.includes("2.5")
+                      ? { thinkingConfig: { thinkingBudget: 0 } }
+                      : {})
+                  },
+                }),
+              }
+            );
+            clearTimeout(timeoutId);
+
+            if (geminiRes.ok) {
+              const geminiData = await geminiRes.json();
+              const rawText = geminiData?.candidates?.[0]?.content?.parts?.[0]?.text;
+              if (rawText) {
+                generated = JSON.parse(rawText);
+                usedModel = model;
+                break; // نجح التوليد، نخرج من الحلقة فوراً
+              }
+            }
+          } catch (_) {
+            // الانتقال تلقائياً للنموذج التالي عند الضغط أو انتهاء المهلة
+          }
         }
-      );
-
-      const geminiData = await geminiRes.json();
-
-      if (!geminiRes.ok || !geminiData.candidates || !geminiData.candidates[0]) {
-        throw new Error(
-          `Gemini API error: ${geminiData.error?.message || JSON.stringify(geminiData)}`
-        );
       }
 
-      const rawText = geminiData.candidates[0].content.parts[0].text;
-      const generated = JSON.parse(rawText);
+      // طبقة الحماية الثالثة: محتوى عربي احترافي مضمون إذا كانت كل النماذج مزدحمة
+      if (!generated) {
+        generated = {
+          heroTitle: `${clientName} — جودة تستحق الثقة`,
+          heroSubtitle: productDescription || `اكتشف أفضل العروض والمنتجات الحصرية لدى ${clientName} مع خدمة توصيل سريعة والدفع عند الاستلام.`,
+          features: [
+            "جودة عالية ومضمونة 100%",
+            "الدفع نقداً عند الاستلام بكل أمان",
+            "توصيل سريع إلى جميع الولايات",
+            "خدمة زبائن متوفرة للإجابة على استفساراتكم"
+          ]
+        };
+      }
 
       const siteConfig = {
         brandName: clientName,
@@ -59,12 +101,7 @@ export default {
         features: Array.isArray(generated.features) ? generated.features : [],
       };
 
-      const slug =
-        "client-" +
-        Date.now().toString(36) +
-        "-" +
-        Math.random().toString(36).substring(2, 6);
-
+      const slug = "client-" + Date.now().toString(36) + "-" + Math.random().toString(36).substring(2, 6);
       const ghHeaders = {
         Authorization: `Bearer ${env.GITHUB_TOKEN}`,
         Accept: "application/vnd.github+json",
@@ -120,6 +157,7 @@ export default {
       return new Response(
         JSON.stringify({
           success: true,
+          usedModel,
           repoName: slug,
           repoUrl: repoData.html_url,
           siteConfig,
@@ -134,4 +172,3 @@ export default {
     }
   },
 };
-
