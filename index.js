@@ -4,12 +4,19 @@ const worker = {
   async fetch(request, env) {
     const corsHeaders = {
       "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "POST, OPTIONS",
+      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
       "Access-Control-Allow-Headers": "Content-Type",
     };
 
     if (request.method === "OPTIONS") {
       return new Response(null, { headers: corsHeaders });
+    }
+
+    if (request.method === "GET") {
+      return new Response(
+        JSON.stringify({ status: "ok", service: "projex-agency-auto-builder" }),
+        { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
     }
 
     if (request.method !== "POST") {
@@ -23,13 +30,13 @@ const worker = {
       const body = await request.json();
       const { clientName, productDescription, price, color, pixelId } = body;
 
-      if (!env.GITHUB_TOKEN) {
-        throw new Error("Missing GITHUB_TOKEN in environment secrets.");
+      const githubToken = env.GH_TOKEN || env.GITHUB_TOKEN;
+      if (!githubToken) {
+        throw new Error("Missing GH_TOKEN in environment secrets.");
       }
 
       const prompt = `Generate JSON only (no markdown) with keys: heroTitle, heroSubtitle, features (array of 4 short Arabic strings) for brand "${clientName}" selling "${productDescription}" at price "${price}".`;
 
-      // قائمة النماذج بالترتيب (الأساسي ثم البدائل السريعة)
       const models = [
         "gemini-3.8-flash",
         "gemini-2.5-flash-lite",
@@ -70,16 +77,14 @@ const worker = {
               if (rawText) {
                 generated = JSON.parse(rawText);
                 usedModel = model;
-                break; // نجح التوليد، نخرج من الحلقة فوراً
+                break;
               }
             }
           } catch (_) {
-            // الانتقال تلقائياً للنموذج التالي عند الضغط أو انتهاء المهلة
           }
         }
       }
 
-      // طبقة الحماية الثالثة: محتوى عربي احترافي مضمون إذا كانت كل النماذج مزدحمة
       if (!generated) {
         generated = {
           heroTitle: `${clientName} — جودة تستحق الثقة`,
@@ -105,13 +110,12 @@ const worker = {
 
       const slug = "client-" + Date.now().toString(36) + "-" + Math.random().toString(36).substring(2, 6);
       const ghHeaders = {
-        Authorization: `Bearer ${env.GITHUB_TOKEN}`,
+        Authorization: `Bearer ${githubToken}`,
         Accept: "application/vnd.github+json",
         "User-Agent": "projex-agency-auto-builder",
         "Content-Type": "application/json",
       };
 
-      // 1. إنشاء مستودع جديد من القالب
       const repoRes = await fetch(
         "https://api.github.com/repos/ddaiftaki-cyber/digital-agency-website-template-react-tailwind/generate",
         {
@@ -131,7 +135,6 @@ const worker = {
         throw new Error(`GitHub generate error: ${repoData.message || JSON.stringify(repoData)}`);
       }
 
-      // 2. جلب SHA الخاص بـ site-config.json مع إعادة المحاولة حتى يجهز المستودع
       const fileUrl = `https://api.github.com/repos/ddaiftaki-cyber/${slug}/contents/site-config.json`;
       let fileSha = null;
 
@@ -151,7 +154,6 @@ const worker = {
         throw new Error(`Could not retrieve SHA for site-config.json in ${slug}. Template copy may still be initializing.`);
       }
 
-      // 3. تحديث site-config.json ببيانات العميل
       const encodedContent = Buffer.from(JSON.stringify(siteConfig, null, 2), "utf8").toString("base64");
       const putRes = await fetch(fileUrl, {
         method: "PUT",
@@ -189,7 +191,6 @@ const worker = {
 
 export default worker;
 
-// تشغيل خادم Node.js HTTP للاستماع على process.env.PORT
 const port = Number(process.env.PORT) || 3000;
 
 const server = http.createServer(async (req, res) => {
