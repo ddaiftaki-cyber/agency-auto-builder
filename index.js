@@ -1,4 +1,6 @@
-export default {
+import http from "node:http";
+
+const worker = {
   async fetch(request, env) {
     const corsHeaders = {
       "Access-Control-Allow-Origin": "*",
@@ -22,7 +24,7 @@ export default {
       const { clientName, productDescription, price, color, pixelId } = body;
 
       if (!env.GITHUB_TOKEN) {
-        throw new Error("Missing GITHUB_TOKEN in Worker secrets.");
+        throw new Error("Missing GITHUB_TOKEN in environment secrets.");
       }
 
       const prompt = `Generate JSON only (no markdown) with keys: heroTitle, heroSubtitle, features (array of 4 short Arabic strings) for brand "${clientName}" selling "${productDescription}" at price "${price}".`;
@@ -150,7 +152,7 @@ export default {
       }
 
       // 3. تحديث site-config.json ببيانات العميل
-      const encodedContent = btoa(unescape(encodeURIComponent(JSON.stringify(siteConfig, null, 2))));
+      const encodedContent = Buffer.from(JSON.stringify(siteConfig, null, 2), "utf8").toString("base64");
       const putRes = await fetch(fileUrl, {
         method: "PUT",
         headers: ghHeaders,
@@ -184,3 +186,46 @@ export default {
     }
   },
 };
+
+export default worker;
+
+// تشغيل خادم Node.js HTTP للاستماع على process.env.PORT
+const port = Number(process.env.PORT) || 3000;
+
+const server = http.createServer(async (req, res) => {
+  try {
+    const protocol = req.headers["x-forwarded-proto"] || "http";
+    const host = req.headers.host || `localhost:${port}`;
+    const url = `${protocol}://${host}${req.url}`;
+
+    const chunks = [];
+    for await (const chunk of req) {
+      chunks.push(chunk);
+    }
+    const rawBody = Buffer.concat(chunks);
+
+    const request = new Request(url, {
+      method: req.method,
+      headers: req.headers,
+      body: req.method !== "GET" && req.method !== "HEAD" && rawBody.length > 0 ? rawBody : undefined,
+    });
+
+    const response = await worker.fetch(request, process.env);
+
+    res.statusCode = response.status;
+    response.headers.forEach((value, key) => {
+      res.setHeader(key, value);
+    });
+
+    const responseBuffer = Buffer.from(await response.arrayBuffer());
+    res.end(responseBuffer);
+  } catch (error) {
+    res.statusCode = 500;
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ success: false, error: error.message }));
+  }
+});
+
+server.listen(port, "0.0.0.0", () => {
+  console.log(`Server listening on port ${port}`);
+});
